@@ -1,0 +1,380 @@
+#include <Arduino.h>
+#include <SPI.h>
+#include <LoRa.h>
+
+#include "air_protocol.h"
+
+
+// =====================================================
+// LORA PIN ESP32-S3 SUPER MINI
+// =====================================================
+
+#define LORA_SCK        7
+#define LORA_MISO       6
+#define LORA_MOSI       5
+
+#define LORA_SS         4
+#define LORA_RST        16
+#define LORA_DIO0       17
+
+
+// PHẢI GIỐNG BÊN TX
+#define LORA_FREQ       433E6
+
+#define LORA_SYNC_WORD  0x12
+
+
+// =====================================================
+// INIT LORA
+// =====================================================
+
+void initLoRa()
+{
+    Serial.println("Khoi tao LoRa RX...");
+
+    SPI.begin(
+        LORA_SCK,
+        LORA_MISO,
+        LORA_MOSI,
+        LORA_SS
+    );
+
+    LoRa.setSPI(SPI);
+
+    LoRa.setPins(
+        LORA_SS,
+        LORA_RST,
+        LORA_DIO0
+    );
+
+    if (!LoRa.begin(LORA_FREQ))
+    {
+        Serial.println(
+            "LOI: Khong tim thay LoRa!"
+        );
+
+        while (1)
+        {
+            delay(1000);
+        }
+    }
+
+    LoRa.setSyncWord(
+        LORA_SYNC_WORD
+    );
+
+    LoRa.setSpreadingFactor(7);
+
+    LoRa.setSignalBandwidth(
+        125E3
+    );
+
+    LoRa.setCodingRate4(5);
+
+    LoRa.setPreambleLength(8);
+
+    LoRa.enableCrc();
+
+    Serial.println(
+        "LoRa RX OK!"
+    );
+}
+
+
+// =====================================================
+// IN JSON
+// =====================================================
+
+void printJSON(
+    const AirPacket &p,
+    int rssi,
+    float snr
+)
+{
+    Serial.print("{");
+
+    Serial.print("\"src\":");
+    Serial.print(p.srcId);
+
+    Serial.print(",");
+
+    Serial.print("\"dst\":");
+    Serial.print(p.dstId);
+
+    Serial.print(",");
+
+    Serial.print("\"seq\":");
+    Serial.print(p.sequence);
+
+    Serial.print(",");
+
+    // ---------------------------
+    // Temperature
+    // ---------------------------
+
+    Serial.print("\"temperature\":");
+
+    if (p.flags & FLAG_DHT_OK)
+    {
+        Serial.print(
+            p.temperature_x100 / 100.0f,
+            2
+        );
+    }
+    else
+    {
+        Serial.print("null");
+    }
+
+    Serial.print(",");
+
+
+    // ---------------------------
+    // Humidity
+    // ---------------------------
+
+    Serial.print("\"humidity\":");
+
+    if (p.flags & FLAG_DHT_OK)
+    {
+        Serial.print(
+            p.humidity_x100 / 100.0f,
+            2
+        );
+    }
+    else
+    {
+        Serial.print("null");
+    }
+
+    Serial.print(",");
+
+
+    // ---------------------------
+    // MQ
+    // ---------------------------
+
+    Serial.print("\"mq7_raw\":");
+    Serial.print(p.mq7_raw);
+
+    Serial.print(",");
+
+    Serial.print("\"mq135_raw\":");
+    Serial.print(p.mq135_raw);
+
+    Serial.print(",");
+
+
+    // ---------------------------
+    // Dust
+    // ---------------------------
+
+    Serial.print("\"dust\":");
+
+    if (p.flags & FLAG_DUST_OK)
+    {
+        Serial.print(
+            p.dust_x10 / 10.0f,
+            1
+        );
+    }
+    else
+    {
+        Serial.print("null");
+    }
+
+    Serial.print(",");
+
+
+    // ---------------------------
+    // LoRa quality
+    // ---------------------------
+
+    Serial.print("\"rssi\":");
+    Serial.print(rssi);
+
+    Serial.print(",");
+
+    Serial.print("\"snr\":");
+    Serial.print(snr, 1);
+
+    Serial.println("}");
+}
+
+
+// =====================================================
+// SETUP
+// =====================================================
+
+void setup()
+{
+    Serial.begin(115200);
+
+    delay(1000);
+
+    Serial.println();
+    Serial.println("==========================");
+    Serial.println(" AQI LORA GATEWAY");
+    Serial.println("==========================");
+
+    initLoRa();
+}
+
+
+// =====================================================
+// LOOP
+// =====================================================
+
+void loop()
+{
+    int packetSize =
+        LoRa.parsePacket();
+
+    if (!packetSize)
+        return;
+
+
+    // ===========================
+    // CHECK LENGTH
+    // ===========================
+
+    if (packetSize != sizeof(AirPacket))
+    {
+        Serial.print(
+            "Sai packet size: "
+        );
+
+        Serial.println(
+            packetSize
+        );
+
+        while (LoRa.available())
+            LoRa.read();
+
+        return;
+    }
+
+
+    // ===========================
+    // READ STRUCT
+    // ===========================
+
+    AirPacket packet;
+
+    uint8_t *ptr =
+        (uint8_t *)&packet;
+
+    int index = 0;
+
+    while (
+        LoRa.available() &&
+        index < sizeof(AirPacket)
+    )
+    {
+        ptr[index++] =
+            LoRa.read();
+    }
+
+
+    // ===========================
+    // CHECK MAGIC
+    // ===========================
+
+    if (packet.magic != PACKET_MAGIC)
+    {
+        Serial.println(
+            "Sai MAGIC!"
+        );
+
+        return;
+    }
+
+
+    // ===========================
+    // CHECK VERSION
+    // ===========================
+
+    if (
+        packet.version
+        != PACKET_VERSION
+    )
+    {
+        Serial.println(
+            "Sai protocol version!"
+        );
+
+        return;
+    }
+
+
+    // ===========================
+    // CHECK ADDRESS
+    // ===========================
+
+    if (
+        packet.dstId != NODE_GATEWAY &&
+        packet.dstId != NODE_BROADCAST
+    )
+    {
+        Serial.println(
+            "Packet khong gui cho node nay"
+        );
+
+        return;
+    }
+
+
+    // ===========================
+    // CHECK CRC
+    // ===========================
+
+    uint16_t crc =
+        calculateCRC16(
+            (uint8_t *)&packet,
+            offsetof(AirPacket, crc16)
+        );
+
+    if (crc != packet.crc16)
+    {
+        Serial.println(
+            "CRC ERROR!"
+        );
+
+        return;
+    }
+
+
+    // ===========================
+    // LORA SIGNAL
+    // ===========================
+
+    int rssi =
+        LoRa.packetRssi();
+
+    float snr =
+        LoRa.packetSnr();
+
+
+    Serial.println();
+    Serial.println(
+        "======== PACKET OK ========"
+    );
+
+    Serial.print("RSSI: ");
+    Serial.print(rssi);
+    Serial.println(" dBm");
+
+    Serial.print("SNR: ");
+    Serial.println(snr);
+
+
+    // ===========================
+    // CONVERT STRUCT -> JSON
+    // ===========================
+
+    printJSON(
+        packet,
+        rssi,
+        snr
+    );
+}
